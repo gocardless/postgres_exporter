@@ -13,6 +13,18 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+const (
+	versionBitSize   = 64
+	infoQuery        = `SHOW server_version /*postgres_exporter*/`
+	listDatnameQuery = `
+SELECT datname FROM pg_database
+WHERE datallowconn = true AND datistemplate = false
+AND datname != ALL($1) /*postgres_exporter*/`
+	successValue    = 1.0
+	failureValue    = 0.0
+	infoMetricValue = 1.0
+	errorKey        = "error"
+)
 var (
 	upDesc = prometheus.NewDesc(
 		"postgres_up",
@@ -40,11 +52,6 @@ var (
 	)
 )
 
-const infoQuery = `SHOW server_version /*postgres_exporter*/`
-const listDatnameQuery = `
-SELECT datname FROM pg_database
-WHERE datallowconn = true AND datistemplate = false
-AND datname != 'cloudsqladmin' /*postgres_exporter*/`
 
 // Scraper is the interface each scraper has to implement.
 type Scraper interface {
@@ -54,11 +61,12 @@ type Scraper interface {
 }
 
 type Exporter struct {
-	ctx             context.Context
-	logger          kitlog.Logger
-	connConfig      *pgx.ConnConfig
-	scrapers        []Scraper
-	datnameScrapers []Scraper
+	ctx               context.Context
+	logger            kitlog.Logger
+	connConfig        *pgx.ConnConfig
+	scrapers          []Scraper
+	datnameScrapers   []Scraper
+	excludedDatabases []string
 }
 
 // Postgres Version
@@ -88,7 +96,7 @@ var _ prometheus.Collector = (*Exporter)(nil)
 // NewExporter is called every time we receive a scrape request and knows how
 // to collect metrics using each of the scrapers. It will live only for the
 // duration of the scrape request.
-func NewExporter(ctx context.Context, logger kitlog.Logger, connConfig *pgx.ConnConfig) *Exporter {
+func NewExporter(ctx context.Context, logger kitlog.Logger, connConfig *pgx.ConnConfig, excludedDatabases []string) *Exporter {
 	return &Exporter{
 		ctx:        ctx,
 		logger:     logger,
@@ -108,6 +116,7 @@ func NewExporter(ctx context.Context, logger kitlog.Logger, connConfig *pgx.Conn
 			NewStatUserIndexesScraper(),
 			NewDiskUsageScraper(),
 		},
+		excludedDatabases: excludedDatabases,
 	}
 }
 
@@ -141,15 +150,16 @@ func (e Exporter) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(infoDesc, prometheus.GaugeValue, 1, v.String())
 
 	// discovery databases
-	var dbnames []string
+	level.Debug(e.logger).Log("excludedDatabases", strings.Join(e.excludedDatabases, ","))
 
-	rows, err := conn.Query(e.ctx, listDatnameQuery)
+	rows, err := conn.Query(e.ctx, listDatnameQuery, e.excludedDatabases)
 	if err != nil {
 		level.Error(e.logger).Log("error", err)
 		return
 	}
 	defer rows.Close()
 
+	var dbnames []string
 	for rows.Next() {
 		var dbname string
 		err := rows.Scan(&dbname)
@@ -159,6 +169,8 @@ func (e Exporter) Collect(ch chan<- prometheus.Metric) {
 		}
 		dbnames = append(dbnames, dbname)
 	}
+
+	level.Debug(e.logger).Log("datnames found", strings.Join(dbnames, ","))
 
 	// run global scrapers
 	for _, scraper := range e.scrapers {

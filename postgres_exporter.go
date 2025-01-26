@@ -23,10 +23,11 @@ import (
 var handlerLock sync.Mutex
 
 var (
-	listenAddress = kingpin.Flag("web.listen-address", "Address on which to expose metrics and web interface.").Default("0.0.0.0:9187").String()
-	metricsPath   = kingpin.Flag("web.telemetry-path", "Path under which to expose metrics.").Default("/metrics").String()
-	dataSource    = kingpin.Flag("db.data-source", "libpq compatible data source, e.g `user=postgres host=/var/run/postgresql`. Leave this blank to read connection information from PG* environment variables").String()
-	logLevel      = kingpin.Flag("log.level", "Only log messages with the given severity or above. Valid levels: [debug, info, warn, error, fatal]").Default("info").String()
+	listenAddress     = kingpin.Flag("web.listen-address", "Address on which to expose metrics and web interface.").Default("0.0.0.0:9187").String()
+	metricsPath       = kingpin.Flag("web.telemetry-path", "Path under which to expose metrics.").Default("/metrics").String()
+	dataSource        = kingpin.Flag("db.data-source", "libpq compatible data source, e.g `user=postgres host=/var/run/postgresql`. Leave this blank to read connection information from PG* environment variables").String()
+	logLevel          = kingpin.Flag("log.level", "Only log messages with the given severity or above. Valid levels: [debug, info, warn, error, fatal]").Default("info").String()
+	excludedDatabases = kingpin.Flag("db.excluded-databases", "Databases to exclude from monitoring. Repeat this flag for multiple databases.").Default("cloudsqladmin", "rdsadmin").Strings()
 )
 
 func main() {
@@ -72,7 +73,7 @@ func main() {
 		}
 	}
 
-	http.Handle(*metricsPath, metricsHandler(logger, connConfig))
+	http.Handle(*metricsPath, metricsHandler(logger, connConfig, *excludedDatabases))
 	http.Handle("/", catchHandler(logger, metricsPath))
 
 	level.Info(logger).Log("component", "web", "msg", "Start listening for connections", "address", *listenAddress)
@@ -98,14 +99,15 @@ func catchHandler(logger kitlog.Logger, meticsPath *string) http.Handler {
 	})
 }
 
-func metricsHandler(logger kitlog.Logger, connConfig *pgx.ConnConfig) http.Handler {
+// metricsHandler creates an HTTP handler that serves Prometheus metrics for PostgreSQL.
+func metricsHandler(logger kitlog.Logger, connConfig *pgx.ConnConfig, excludedDatabases []string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		handlerLock.Lock()
 		defer handlerLock.Unlock()
 
 		registry := prometheus.NewRegistry()
 		registry.MustRegister(version.NewCollector("postgres_exporter"))
-		registry.MustRegister(collector.NewExporter(r.Context(), logger, connConfig))
+		registry.MustRegister(collector.NewExporter(r.Context(), logger, connConfig, excludedDatabases))
 
 		gatherers := prometheus.Gatherers{
 			prometheus.DefaultGatherer,
